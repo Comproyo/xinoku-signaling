@@ -1,0 +1,13 @@
+{
+  "name": "opendesk-signaling",
+  "version": "1.0.0",
+  "description": "Servidor de señalización WebRTC para OpenDesk",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.4",
+    "express": "^4.18.3"
+  }
+}
