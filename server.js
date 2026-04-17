@@ -6,7 +6,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 5e6
+  maxHttpBufferSize: 50e6
 });
 
 const PORT = process.env.PORT || 3000;
