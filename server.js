@@ -17,7 +17,7 @@ app.get("/", (req, res) => res.send("Xinoku Connect — Signaling Server activo.
 io.on("connection", (socket) => {
   console.log(`[+] ${socket.id}`);
 
-  // Agente registra su codigo
+  // Agente se registra
   socket.on("registrar", (codigo) => {
     sesiones[codigo] = socket.id;
     socket.data.codigo = codigo;
@@ -25,20 +25,21 @@ io.on("connection", (socket) => {
     socket.emit("registrado", { codigo });
   });
 
-  // Controlador quiere conectarse
+  // Controlador quiere unirse
   socket.on("unirse", (codigo) => {
     const agenteId = sesiones[codigo];
     if (!agenteId) {
       socket.emit("error-sesion", { mensaje: "Codigo no encontrado." });
       return;
     }
-    console.log(`[JOIN] ${socket.id} -> agente ${agenteId}`);
+    console.log(`[JOIN] ctrl=${socket.id} -> agente=${agenteId}`);
     io.to(agenteId).emit("solicitud-conexion", { desde: socket.id });
     socket.emit("sesion-encontrada", { hacia: agenteId });
   });
 
-  // Permiso aceptado/rechazado
+  // Permiso
   socket.on("permiso-respuesta", ({ hacia, aceptado }) => {
+    console.log(`[PERMISO] hacia=${hacia} aceptado=${aceptado}`);
     io.to(hacia).emit("permiso-respuesta", { aceptado });
   });
 
@@ -51,9 +52,15 @@ io.on("connection", (socket) => {
   socket.on("accion_mouse",   (data) => io.to(data.hacia).emit("accion_mouse",   data));
   socket.on("accion_teclado", (data) => io.to(data.hacia).emit("accion_teclado", data));
 
-  // ── CHAT — preservar campo "de" ──
+  // ── CHAT controlador → agente (via socket del controlador) ──
   socket.on("chat", ({ hacia, mensaje, de }) => {
-    console.log(`[CHAT] de=${de} hacia=${hacia} msg=${mensaje}`);
+    console.log(`[CHAT] de=${de} hacia=${hacia}: ${mensaje}`);
+    io.to(hacia).emit("chat", { mensaje, de });
+  });
+
+  // ── CHAT agente-renderer → controlador (socket directo del renderer) ──
+  socket.on("chat-agente", ({ hacia, mensaje, de }) => {
+    console.log(`[CHAT-AGENTE] de=${de} hacia=${hacia}: ${mensaje}`);
     io.to(hacia).emit("chat", { mensaje, de });
   });
 
@@ -63,17 +70,19 @@ io.on("connection", (socket) => {
   socket.on("archivo-fin",   ({ hacia })        => io.to(hacia).emit("archivo-fin",   {}));
   socket.on("archivo-recibido", ({ hacia, nombre }) => io.to(hacia).emit("archivo-recibido", { nombre }));
 
-  // ── Archivos: agente → controlador ──
-  socket.on("archivo_meta_agente",  ({ hacia, meta })  => io.to(hacia).emit("archivo_meta_agente",  { meta }));
-  socket.on("archivo_chunk_agente", ({ hacia, chunk }) => io.to(hacia).emit("archivo_chunk_agente", { chunk }));
-  socket.on("archivo_fin_agente",   ({ hacia })        => io.to(hacia).emit("archivo_fin_agente",   {}));
+  // ── Archivos: agente-renderer → controlador ──
+  socket.on("archivo-meta-agente",  ({ hacia, meta })  => io.to(hacia).emit("archivo-meta-agente",  { meta }));
+  socket.on("archivo-chunk-agente", ({ hacia, chunk }) => io.to(hacia).emit("archivo-chunk-agente", { chunk }));
+  socket.on("archivo-fin-agente",   ({ hacia })        => io.to(hacia).emit("archivo-fin-agente",   {}));
+  socket.on("archivo-recibido-agente", ({ hacia, nombre }) => io.to(hacia).emit("archivo-recibido", { nombre }));
 
-  // ── Agente finaliza sesion ──
+  // ── Sesion finalizada por agente ──
   socket.on("sesion-finalizada-por-agente", ({ hacia }) => {
+    console.log(`[FIN-AGENTE] hacia=${hacia}`);
     io.to(hacia).emit("sesion-finalizada-por-agente");
   });
 
-  // Señalizacion WebRTC (por si acaso)
+  // Señalizacion WebRTC
   socket.on("oferta",        ({ hacia, oferta })    => io.to(hacia).emit("oferta",        { desde: socket.id, oferta }));
   socket.on("respuesta",     ({ hacia, respuesta }) => io.to(hacia).emit("respuesta",     { desde: socket.id, respuesta }));
   socket.on("ice-candidato", ({ hacia, candidato }) => io.to(hacia).emit("ice-candidato", { desde: socket.id, candidato }));
@@ -90,5 +99,5 @@ io.on("connection", (socket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Xinoku Signaling Server en puerto ${PORT}`);
+  console.log(`Xinoku Signaling en puerto ${PORT}`);
 });
