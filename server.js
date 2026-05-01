@@ -110,6 +110,21 @@ io.on("connection", (socket) => {
     io.to(hacia).emit("archivo-recibido", { nombre });
   });
 
+  // Archivos directo al renderer (nueva via)
+  socket.on("archivo-meta-para-renderer", ({ hacia, meta }) => {
+    const r = renderers[hacia];
+    if (r) { io.to(r).emit("archivo-meta-para-renderer", { meta }); console.log(`[ARCH-RENDERER] meta hacia renderer ${r}`); }
+    else console.log(`[ARCH-RENDERER] Sin renderer para ${hacia}`);
+  });
+  socket.on("archivo-chunk-para-renderer", ({ hacia, chunk }) => {
+    const r = renderers[hacia];
+    if (r) io.to(r).emit("archivo-chunk-para-renderer", { chunk });
+  });
+  socket.on("archivo-fin-para-renderer", ({ hacia }) => {
+    const r = renderers[hacia];
+    if (r) { io.to(r).emit("archivo-fin-para-renderer", {}); console.log(`[ARCH-RENDERER] fin hacia renderer ${r}`); }
+  });
+
   // ── ARCHIVOS PC controlada -> controlador ──
   socket.on("archivo-meta-agente",   ({ hacia, meta })  => io.to(hacia).emit("archivo-meta-agente",  { meta }));
   socket.on("archivo-chunk-agente",  ({ hacia, chunk }) => io.to(hacia).emit("archivo-chunk-agente", { chunk }));
