@@ -6,81 +6,113 @@ const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 50e6
+  maxHttpBufferSize: 100e6
 });
 
-const PORT    = process.env.PORT || 3000;
-const agentes  = {};   // codigo -> socket.id del agente Python
-const renderers = {};  // socket.id del agente Python -> socket.id del renderer
+const PORT = process.env.PORT || 3000;
+
+// codigo -> [socket.id del agente Python, socket.id del renderer, ...]
+// Todos los sockets registrados con el mismo codigo reciben los mismos eventos
+const grupos = {};  // codigo -> Set de socket.ids
+
+// socket.id -> codigo (para limpiar al desconectar)
+const socketCodigo = {};
+
+// codigo -> socket.id del controlador activo
+const controladores = {};
 
 app.get("/", (req, res) => res.send("Xinoku Connect — Signaling Server activo."));
+
+function enviarAGrupo(codigo, evento, data) {
+  const grupo = grupos[codigo];
+  if (!grupo) return;
+  for (const sid of grupo) {
+    io.to(sid).emit(evento, data);
+  }
+}
 
 io.on("connection", (socket) => {
   console.log(`[+] ${socket.id}`);
 
-  // Agente Python se registra
+  // Agente Python se registra con su codigo
   socket.on("registrar", (codigo) => {
-    agentes[codigo] = socket.id;
+    if (!grupos[codigo]) grupos[codigo] = new Set();
+    grupos[codigo].add(socket.id);
+    socketCodigo[socket.id] = codigo;
     socket.data.codigo = codigo;
-    console.log(`[AGENTE] ${codigo} -> ${socket.id}`);
+    socket.data.tipo   = "agente";
+    console.log(`[AGENTE] ${codigo} -> ${socket.id} | grupo size: ${grupos[codigo].size}`);
     socket.emit("registrado", { codigo });
   });
 
-  // Renderer de PC controlada se registra con su codigo
+  // Renderer Electron se registra con el MISMO codigo del agente
+  // Asi queda en el mismo "grupo" y recibe todos los eventos
   socket.on("registrar-renderer-por-codigo", ({ codigo }) => {
-    const agenteId = agentes[codigo];
-    if (!agenteId) {
-      console.log(`[RENDERER] FAIL: ${codigo} no encontrado. Agentes:`, Object.keys(agentes));
+    if (!grupos[codigo]) {
+      console.log(`[RENDERER] FAIL: codigo ${codigo} no existe. Grupos:`, Object.keys(grupos));
       socket.emit("renderer-registrado", { ok: false });
       return;
     }
-    renderers[agenteId] = socket.id;
-    socket.data.agenteId = agenteId;
-    console.log(`[RENDERER] OK: ${codigo} agenteId=${agenteId} rendererId=${socket.id}`);
-    socket.emit("renderer-registrado", { ok: true, agenteId });
+    grupos[codigo].add(socket.id);
+    socketCodigo[socket.id] = codigo;
+    socket.data.codigo = codigo;
+    socket.data.tipo   = "renderer";
+    console.log(`[RENDERER] OK: ${codigo} rendererId=${socket.id} | grupo size: ${grupos[codigo].size}`);
+    socket.emit("renderer-registrado", { ok: true });
   });
 
   // Controlador quiere unirse
   socket.on("unirse", (codigo) => {
-    const agenteId = agentes[codigo];
-    if (!agenteId) {
+    if (!grupos[codigo] || grupos[codigo].size === 0) {
       socket.emit("error-sesion", { mensaje: "Codigo no encontrado." });
       return;
     }
-    console.log(`[JOIN] ctrl=${socket.id} -> agente=${agenteId}`);
+    // Encontrar el agente Python (primer socket del grupo)
+    const agenteId = [...grupos[codigo]][0];
+    controladores[codigo] = socket.id;
+    socket.data.codigo  = codigo;
+    socket.data.tipo    = "controlador";
+    socket.data.agenteId = agenteId;
+    console.log(`[JOIN] ctrl=${socket.id} -> grupo=${codigo} agenteId=${agenteId}`);
     io.to(agenteId).emit("solicitud-conexion", { desde: socket.id });
     socket.emit("sesion-encontrada", { hacia: agenteId });
   });
 
-  // Permiso aceptado/rechazado
-  // Cuando el agente acepta, también envía su propio ID al controlador
+  // Permiso
   socket.on("permiso-respuesta", ({ hacia, aceptado }) => {
     console.log(`[PERMISO] hacia=${hacia} aceptado=${aceptado}`);
     if (aceptado) {
-      // Le decimos al controlador el ID del agente que lo aceptó
       io.to(hacia).emit("permiso-respuesta", { aceptado, agenteId: socket.id });
     } else {
       io.to(hacia).emit("permiso-respuesta", { aceptado });
     }
   });
 
+  // Frames
   socket.on("frame", ({ hacia, frame }) => {
     io.to(hacia).emit("frame", { frame });
   });
 
+  // Mouse / teclado
   socket.on("accion_mouse",   (data) => io.to(data.hacia).emit("accion_mouse",   data));
   socket.on("accion_teclado", (data) => io.to(data.hacia).emit("accion_teclado", data));
 
-  // ── CHAT ──
-  // Controlador -> PC controlada (agente + renderer)
+  // ── CHAT controlador -> PC controlada ──
   socket.on("chat", ({ hacia, mensaje, de }) => {
     console.log(`[CHAT] de=${de} hacia=${hacia} msg="${mensaje}"`);
-    io.to(hacia).emit("chat", { mensaje, de });
-    const rendererId = renderers[hacia];
-    if (rendererId) {
-      io.to(rendererId).emit("chat", { mensaje, de });
+    // Enviar a TODOS los sockets del grupo (agente + renderer)
+    const codigo = socketCodigo[hacia] || socket.data.codigo;
+    // Buscar el codigo del destino
+    let codigoDestino = null;
+    for (const [cod, grupo] of Object.entries(grupos)) {
+      if (grupo.has(hacia)) { codigoDestino = cod; break; }
+    }
+    if (codigoDestino) {
+      enviarAGrupo(codigoDestino, "chat", { mensaje, de });
+      console.log(`[CHAT] Enviado a grupo ${codigoDestino} (${grupos[codigoDestino]?.size} sockets)`);
     } else {
-      console.log(`[CHAT] Sin renderer para ${hacia}`);
+      // Fallback: enviar directo
+      io.to(hacia).emit("chat", { mensaje, de });
     }
   });
 
@@ -91,38 +123,49 @@ io.on("connection", (socket) => {
   });
 
   // ── ARCHIVOS controlador -> PC controlada ──
+  // Enviar a TODOS los sockets del grupo
   socket.on("archivo-meta", ({ hacia, meta }) => {
-    io.to(hacia).emit("archivo-meta", { meta });
-    const r = renderers[hacia];
-    if (r) io.to(r).emit("archivo-meta-ctrl", { meta });
-  });
-  socket.on("archivo-chunk", ({ hacia, chunk }) => {
-    io.to(hacia).emit("archivo-chunk", { chunk });
-    const r = renderers[hacia];
-    if (r) io.to(r).emit("archivo-chunk-ctrl", { chunk });
-  });
-  socket.on("archivo-fin", ({ hacia }) => {
-    io.to(hacia).emit("archivo-fin", {});
-    const r = renderers[hacia];
-    if (r) io.to(r).emit("archivo-fin-ctrl", {});
-  });
-  socket.on("archivo-recibido", ({ hacia, nombre }) => {
-    io.to(hacia).emit("archivo-recibido", { nombre });
+    console.log(`[ARCH-META] hacia=${hacia} nombre=${meta?.nombre}`);
+    let codigoDestino = null;
+    for (const [cod, grupo] of Object.entries(grupos)) {
+      if (grupo.has(hacia)) { codigoDestino = cod; break; }
+    }
+    if (codigoDestino) {
+      enviarAGrupo(codigoDestino, "archivo-meta", { meta });
+      console.log(`[ARCH-META] Enviado a grupo ${codigoDestino} (${grupos[codigoDestino]?.size} sockets)`);
+    } else {
+      io.to(hacia).emit("archivo-meta", { meta });
+    }
   });
 
-  // Archivos directo al renderer (nueva via)
-  socket.on("archivo-meta-para-renderer", ({ hacia, meta }) => {
-    const r = renderers[hacia];
-    if (r) { io.to(r).emit("archivo-meta-para-renderer", { meta }); console.log(`[ARCH-RENDERER] meta hacia renderer ${r}`); }
-    else console.log(`[ARCH-RENDERER] Sin renderer para ${hacia}`);
+  socket.on("archivo-chunk", ({ hacia, chunk }) => {
+    let codigoDestino = null;
+    for (const [cod, grupo] of Object.entries(grupos)) {
+      if (grupo.has(hacia)) { codigoDestino = cod; break; }
+    }
+    if (codigoDestino) {
+      enviarAGrupo(codigoDestino, "archivo-chunk", { chunk });
+    } else {
+      io.to(hacia).emit("archivo-chunk", { chunk });
+    }
   });
-  socket.on("archivo-chunk-para-renderer", ({ hacia, chunk }) => {
-    const r = renderers[hacia];
-    if (r) io.to(r).emit("archivo-chunk-para-renderer", { chunk });
+
+  socket.on("archivo-fin", ({ hacia }) => {
+    console.log(`[ARCH-FIN] hacia=${hacia}`);
+    let codigoDestino = null;
+    for (const [cod, grupo] of Object.entries(grupos)) {
+      if (grupo.has(hacia)) { codigoDestino = cod; break; }
+    }
+    if (codigoDestino) {
+      enviarAGrupo(codigoDestino, "archivo-fin", {});
+      console.log(`[ARCH-FIN] Enviado a grupo ${codigoDestino} (${grupos[codigoDestino]?.size} sockets)`);
+    } else {
+      io.to(hacia).emit("archivo-fin", {});
+    }
   });
-  socket.on("archivo-fin-para-renderer", ({ hacia }) => {
-    const r = renderers[hacia];
-    if (r) { io.to(r).emit("archivo-fin-para-renderer", {}); console.log(`[ARCH-RENDERER] fin hacia renderer ${r}`); }
+
+  socket.on("archivo-recibido", ({ hacia, nombre }) => {
+    io.to(hacia).emit("archivo-recibido", { nombre });
   });
 
   // ── ARCHIVOS PC controlada -> controlador ──
@@ -136,26 +179,31 @@ io.on("connection", (socket) => {
     io.to(hacia).emit("sesion-finalizada-por-agente");
   });
   socket.on("sesion-finalizada-por-controlador", ({ hacia }) => {
-    io.to(hacia).emit("sesion-finalizada-por-controlador");
-    const r = renderers[hacia];
-    if (r) io.to(r).emit("sesion-finalizada-por-controlador");
+    // Enviar a todo el grupo de la PC controlada
+    let codigoDestino = null;
+    for (const [cod, grupo] of Object.entries(grupos)) {
+      if (grupo.has(hacia)) { codigoDestino = cod; break; }
+    }
+    if (codigoDestino) {
+      enviarAGrupo(codigoDestino, "sesion-finalizada-por-controlador", {});
+    } else {
+      io.to(hacia).emit("sesion-finalizada-por-controlador");
+    }
   });
 
   // ── Desconexion ──
   socket.on("disconnect", () => {
-    for (const [codigo, id] of Object.entries(agentes)) {
-      if (id === socket.id) {
-        delete agentes[codigo];
-        delete renderers[socket.id];
-        console.log(`[-] Agente ${codigo} desconectado`);
+    const codigo = socketCodigo[socket.id];
+    if (codigo && grupos[codigo]) {
+      grupos[codigo].delete(socket.id);
+      if (grupos[codigo].size === 0) {
+        delete grupos[codigo];
+        console.log(`[-] Grupo ${codigo} eliminado`);
+      } else {
+        console.log(`[-] Socket ${socket.id} removido de grupo ${codigo}. Quedan: ${grupos[codigo].size}`);
       }
     }
-    for (const [agenteId, rendererId] of Object.entries(renderers)) {
-      if (rendererId === socket.id) {
-        delete renderers[agenteId];
-        console.log(`[-] Renderer de ${agenteId} desconectado`);
-      }
-    }
+    delete socketCodigo[socket.id];
     console.log(`[-] ${socket.id}`);
   });
 });
