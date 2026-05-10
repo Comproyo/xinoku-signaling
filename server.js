@@ -10,9 +10,9 @@ const io     = new Server(server, {
 });
 
 const PORT         = process.env.PORT || 3000;
-const grupos       = {};   // codigo -> Set de socket.ids
-const socketCodigo = {};   // socket.id -> codigo
-const controladores = {};  // codigo -> socket.id del controlador
+const grupos       = {};
+const socketCodigo = {};
+const controladores = {};
 
 app.get("/", (req, res) => res.send("Xinoku Connect — Signaling Server activo."));
 
@@ -34,7 +34,6 @@ function codigoDeSocketId(socketId) {
 io.on("connection", (socket) => {
   console.log(`[+] ${socket.id}`);
 
-  // Agente Python se registra
   socket.on("registrar", (codigo) => {
     if (!grupos[codigo]) grupos[codigo] = new Set();
     grupos[codigo].add(socket.id);
@@ -45,12 +44,10 @@ io.on("connection", (socket) => {
     socket.emit("registrado", { codigo });
   });
 
-  // Renderer Electron se registra con el mismo codigo del agente.
-  // FIX: si el grupo no existe aun, se crea igualmente — nunca rechazar.
   socket.on("registrar-renderer-por-codigo", ({ codigo }) => {
     if (!grupos[codigo]) {
       grupos[codigo] = new Set();
-      console.log(`[RENDERER] Grupo ${codigo} creado por renderer (agente aun no llegó)`);
+      console.log(`[RENDERER] Grupo ${codigo} creado por renderer`);
     }
     grupos[codigo].add(socket.id);
     socketCodigo[socket.id] = codigo;
@@ -60,21 +57,17 @@ io.on("connection", (socket) => {
     socket.emit("renderer-registrado", { ok: true });
   });
 
-  // Controlador quiere unirse
   socket.on("unirse", (codigo) => {
     if (!grupos[codigo] || grupos[codigo].size === 0) {
       socket.emit("error-sesion", { mensaje: "Codigo no encontrado." });
       return;
     }
-    // Buscar el agente Python (tipo agente) en el grupo
     let agenteId = null;
     for (const sid of grupos[codigo]) {
       const s = io.sockets.sockets.get(sid);
       if (s?.data?.tipo === "agente") { agenteId = sid; break; }
     }
-    // Fallback: primer socket del grupo
     if (!agenteId) agenteId = [...grupos[codigo]][0];
-
     controladores[codigo] = socket.id;
     socket.data.codigo    = codigo;
     socket.data.tipo      = "controlador";
@@ -84,9 +77,7 @@ io.on("connection", (socket) => {
     socket.emit("sesion-encontrada", { hacia: agenteId });
   });
 
-  // Permiso
   socket.on("permiso-respuesta", ({ hacia, aceptado }) => {
-    console.log(`[PERMISO] hacia=${hacia} aceptado=${aceptado}`);
     if (aceptado) {
       io.to(hacia).emit("permiso-respuesta", { aceptado, agenteId: socket.id });
     } else {
@@ -94,84 +85,90 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Frames
-  socket.on("frame", ({ hacia, frame }) => {
-    io.to(hacia).emit("frame", { frame });
+  socket.on("frame", ({ hacia, frame, pantalla_w, pantalla_h, frame_w, frame_h }) => {
+    io.to(hacia).emit("frame", { frame, pantalla_w, pantalla_h, frame_w, frame_h });
   });
 
-  // Mouse / teclado — directo al agente
   socket.on("accion_mouse",   (data) => io.to(data.hacia).emit("accion_mouse",   data));
   socket.on("accion_teclado", (data) => io.to(data.hacia).emit("accion_teclado", data));
 
-  // ── CHAT controlador -> PC controlada ──
+  // Chat
   socket.on("chat", ({ hacia, mensaje, de }) => {
-    console.log(`[CHAT] de=${de} hacia=${hacia} msg="${mensaje}"`);
     const cod = codigoDeSocketId(hacia);
-    if (cod) {
-      enviarAGrupo(cod, "chat", { mensaje, de });
-      console.log(`[CHAT] -> grupo ${cod} (${grupos[cod]?.size} sockets)`);
-    } else {
-      io.to(hacia).emit("chat", { mensaje, de });
-    }
+    if (cod) enviarAGrupo(cod, "chat", { mensaje, de });
+    else io.to(hacia).emit("chat", { mensaje, de });
   });
-
-  // PC controlada -> controlador
   socket.on("chat-agente", ({ hacia, mensaje, de }) => {
-    console.log(`[CHAT-AGENTE] hacia=${hacia} msg="${mensaje}"`);
     io.to(hacia).emit("chat", { mensaje, de });
   });
 
-  // ── ARCHIVOS controlador -> PC controlada ──
+  // Archivos ctrl -> PC
   socket.on("archivo-meta", ({ hacia, meta }) => {
-    console.log(`[ARCH-META] hacia=${hacia} nombre=${meta?.nombre}`);
     const cod = codigoDeSocketId(hacia);
-    if (cod) {
-      enviarAGrupo(cod, "archivo-meta", { meta });
-      console.log(`[ARCH-META] -> grupo ${cod} (${grupos[cod]?.size} sockets)`);
-    } else {
-      io.to(hacia).emit("archivo-meta", { meta });
-    }
+    if (cod) enviarAGrupo(cod, "archivo-meta", { meta });
+    else io.to(hacia).emit("archivo-meta", { meta });
   });
-
   socket.on("archivo-chunk", ({ hacia, chunk }) => {
     const cod = codigoDeSocketId(hacia);
     if (cod) enviarAGrupo(cod, "archivo-chunk", { chunk });
     else io.to(hacia).emit("archivo-chunk", { chunk });
   });
-
   socket.on("archivo-fin", ({ hacia }) => {
-    console.log(`[ARCH-FIN] hacia=${hacia}`);
     const cod = codigoDeSocketId(hacia);
-    if (cod) {
-      enviarAGrupo(cod, "archivo-fin", {});
-      console.log(`[ARCH-FIN] -> grupo ${cod} (${grupos[cod]?.size} sockets)`);
-    } else {
-      io.to(hacia).emit("archivo-fin", {});
-    }
+    if (cod) enviarAGrupo(cod, "archivo-fin", {});
+    else io.to(hacia).emit("archivo-fin", {});
   });
-
   socket.on("archivo-recibido", ({ hacia, nombre }) => {
     io.to(hacia).emit("archivo-recibido", { nombre });
   });
 
-  // ── ARCHIVOS PC controlada -> controlador ──
+  // Archivos PC -> ctrl
   socket.on("archivo-meta-agente",   ({ hacia, meta })   => io.to(hacia).emit("archivo-meta-agente",  { meta }));
   socket.on("archivo-chunk-agente",  ({ hacia, chunk })  => io.to(hacia).emit("archivo-chunk-agente", { chunk }));
   socket.on("archivo-fin-agente",    ({ hacia })         => io.to(hacia).emit("archivo-fin-agente",   {}));
   socket.on("archivo-recibido-ctrl", ({ hacia, nombre }) => io.to(hacia).emit("archivo-recibido",     { nombre }));
 
-  // ── SESION ──
+  // ── LLAMADA DE VOZ — señalización WebRTC ──
+  // El controlador inicia la llamada hacia el grupo
+  socket.on("llamada-oferta", ({ hacia, oferta }) => {
+    console.log(`[LLAMADA] oferta de ${socket.id} hacia ${hacia}`);
+    const cod = codigoDeSocketId(hacia);
+    if (cod) enviarAGrupo(cod, "llamada-oferta", { de: socket.id, oferta });
+    else io.to(hacia).emit("llamada-oferta", { de: socket.id, oferta });
+  });
+
+  socket.on("llamada-respuesta", ({ hacia, respuesta }) => {
+    console.log(`[LLAMADA] respuesta de ${socket.id} hacia ${hacia}`);
+    io.to(hacia).emit("llamada-respuesta", { de: socket.id, respuesta });
+  });
+
+  socket.on("llamada-ice", ({ hacia, candidato }) => {
+    const cod = codigoDeSocketId(hacia);
+    if (cod) enviarAGrupo(cod, "llamada-ice", { de: socket.id, candidato });
+    else io.to(hacia).emit("llamada-ice", { de: socket.id, candidato });
+  });
+
+  socket.on("llamada-colgar", ({ hacia }) => {
+    console.log(`[LLAMADA] colgar de ${socket.id} hacia ${hacia}`);
+    const cod = codigoDeSocketId(hacia);
+    if (cod) enviarAGrupo(cod, "llamada-colgar", { de: socket.id });
+    else io.to(hacia).emit("llamada-colgar", { de: socket.id });
+  });
+
+  socket.on("llamada-rechazar", ({ hacia }) => {
+    io.to(hacia).emit("llamada-rechazar", { de: socket.id });
+  });
+
+  // Sesion
   socket.on("sesion-finalizada-por-agente", ({ hacia }) => {
     io.to(hacia).emit("sesion-finalizada-por-agente");
   });
-
   socket.on("sesion-finalizada-por-controlador", ({ hacia }) => {
     const cod = codigoDeSocketId(hacia);
     if (cod) enviarAGrupo(cod, "sesion-finalizada-por-controlador", {});
     else io.to(hacia).emit("sesion-finalizada-por-controlador");
   });
 
-  // ── Desconexion ──
   socket.on("disconnect", () => {
     const codigo = socketCodigo[socket.id];
     if (codigo && grupos[codigo]) {
